@@ -1,301 +1,221 @@
 """
-Application IA-BrainStormer GPS
+Application IA-BrainStormer GPS (Version Monolithe)
 Système complet : Crash Test DUR + Génération + Priorisation + Séquençage
-Mode BYOK (Bring Your Own Key) pour déploiement public
+Mode BYOK (Bring Your Own Key)
 """
 import streamlit as st
 import json
-# Import direct (Structure à plat)
-from gps_system import GPSSystem
+from openai import OpenAI
 
-# --- FONCTION DE RESET (CALLBACK) ---
-def reset_app():
-    """
-    Cette fonction nettoie l'historique mais GARDE la clé API.
-    Elle est appelée AVANT le rechargement de la page.
-    """
-    keys_to_keep = ['step', 'openai_api_key_input'] # On garde la clé API
+# ==========================================
+# 1. LES PROMPTS SYSTÈME (LE CERVEAU)
+# ==========================================
+
+SYSTEM_PROMPT_CRASH_TEST = """Tu agis en tant qu'Auditeur Stratégique impitoyable ("Devil's Advocate"). 
+Analyse l'idée selon la matrice D.U.R. (Douloureux, Urgent, Reconnu). Note chaque pilier sur 10.
+
+RÈGLE DE DÉCISION :
+- Si Score Total < 20/30 OU si une seule note est < 5/10 : Le projet est "ROUGE".
+- Sinon : Le projet est "VERT".
+
+FORMAT DE RÉPONSE ATTENDU (JSON) :
+{
+  "score_D": 0, "score_U": 0, "score_R": 0, "total": 0,
+  "verdict": "VERT ou ROUGE",
+  "analyse_critique": "Phrase courte",
+  "conseil_architecte": "Action concrète"
+}"""
+
+SYSTEM_PROMPT_PHASE_G = """Tu es l'Explorateur de Perspectives. Génère 10 angles radicalement différents.
+FORMAT JSON : { "angles": [ {"id": 1, "titre": "...", "cible_precise": "...", "opportunite": "..."} ] }"""
+
+SYSTEM_PROMPT_PHASE_P = """Tu es l'Expert en Stratégie. Utilise la Matrice de Conviction.
+Pondération : Douleur (Coef 4), Unicité (Coef 3), Alignement (Coef 3).
+NE CHOISIS PAS LA FACILITÉ.
+FORMAT JSON : { "evaluations": [...], "recommandation": {"id_gagnant": 1, "raison": "..."} }"""
+
+SYSTEM_PROMPT_PHASE_S = """Tu es Chef de Projet Sprint. Utilise le BACKCASTING.
+Pars de J+7 (Résultat Final) et remonte jusqu'à J+1.
+FORMAT JSON : { "resultat_j7": "...", "etapes_journalieres": [ {"jour": "J+7", "action_principale": "...", "detail_execution": "..."} ] }"""
+
+# ==========================================
+# 2. LES CLASSES UTILITAIRES (LA MÉCANIQUE)
+# ==========================================
+
+class OpenAIHelper:
+    def __init__(self, api_key: str, default_model: str = "gpt-4o"):
+        self.client = OpenAI(api_key=api_key)
+        self.default_model = default_model
     
-    # On remet l'étape à zéro
-    st.session_state.step = 'crash_test'
+    def call_gpt(self, system_prompt: str, user_message: str, model: str = None, response_format: dict = None) -> dict:
+        if model is None: model = self.default_model
+        try:
+            messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
+            call_params = {"model": model, "messages": messages, "temperature": 0.7}
+            if response_format: call_params["response_format"] = response_format
+            
+            response = self.client.chat.completions.create(**call_params)
+            content = response.choices[0].message.content
+            try: return json.loads(content)
+            except json.JSONDecodeError: return {"raw_response": content}
+        except Exception as e:
+            return {"error": True, "message": f"Erreur API : {str(e)}"}
+
+class GPSSystem:
+    def __init__(self, api_key: str, model: str = "gpt-4o"):
+        self.openai_helper = OpenAIHelper(api_key, default_model=model)
     
-    # On efface tout le reste (résultats, idées, etc.)
-    for key in list(st.session_state.keys()):
-        if key not in keys_to_keep:
-            del st.session_state[key]
+    def crash_test_dur(self, idee: str) -> dict:
+        return self.openai_helper.call_gpt(
+            SYSTEM_PROMPT_CRASH_TEST, 
+            f"Analyse cette idée : {idee}", 
+            response_format={"type": "json_object"}
+        )
+    
+    def phase_g_generation(self, idee: str) -> dict:
+        return self.openai_helper.call_gpt(
+            SYSTEM_PROMPT_PHASE_G, 
+            f"Génère 10 angles pour : {idee}", 
+            response_format={"type": "json_object"}
+        )
 
-# Configuration de la page
-st.set_page_config(
-    page_title="IA-BrainStormer GPS",
-    page_icon="🧭",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+    def phase_p_priorisation(self, angles: list) -> dict:
+        angles_text = "\n".join([f"ID {a['id']}: {a['titre']} ({a['cible_precise']})" for a in angles])
+        return self.openai_helper.call_gpt(
+            SYSTEM_PROMPT_PHASE_P, 
+            f"Classe ces options :\n{angles_text}", 
+            response_format={"type": "json_object"}
+        )
 
-# CSS personnalisé
+    def phase_s_sequencage(self, angle: dict) -> dict:
+        return self.openai_helper.call_gpt(
+            SYSTEM_PROMPT_PHASE_S, 
+            f"Plan Backcasting pour : {angle['titre']}", 
+            response_format={"type": "json_object"}
+        )
+
+# ==========================================
+# 3. L'INTERFACE UTILISATEUR (L'APP)
+# ==========================================
+
+# Configuration Page
+st.set_page_config(page_title="IA-BrainStormer GPS", page_icon="🧭", layout="wide")
+
+# CSS
 st.markdown("""
 <style>
-    .main-title {
-        font-size: 3rem;
-        font-weight: bold;
-        text-align: center;
-        margin-bottom: 2rem;
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    .phase-title {
-        font-size: 2rem;
-        font-weight: bold;
-        margin-top: 2rem;
-        margin-bottom: 1rem;
-        color: #667eea;
-    }
-    .verdict-vert {
-        background-color: #d4edda;
-        border-left: 5px solid #28a745;
-        padding: 1rem;
-        border-radius: 5px;
-    }
-    .verdict-rouge {
-        background-color: #f8d7da;
-        border-left: 5px solid #dc3545;
-        padding: 1rem;
-        border-radius: 5px;
-    }
-    .stButton>button {
-        width: 100%;
-    }
+    .main-title {font-size: 3rem; text-align: center; color: #667eea;}
+    .verdict-vert {background-color: #d4edda; padding: 1rem; border-radius: 5px; border-left: 5px solid #28a745;}
+    .verdict-rouge {background-color: #f8d7da; padding: 1rem; border-radius: 5px; border-left: 5px solid #dc3545;}
 </style>
 """, unsafe_allow_html=True)
 
-# Initialisation de l'état de session de base
-if 'step' not in st.session_state:
+# Fonction Reset
+def reset_app():
+    keys_to_keep = ['step', 'openai_api_key_input']
     st.session_state.step = 'crash_test'
+    for key in list(st.session_state.keys()):
+        if key not in keys_to_keep: del st.session_state[key]
 
-# --- SIDEBAR : CONFIGURATION (SÉCURITÉ) ---
+if 'step' not in st.session_state: st.session_state.step = 'crash_test'
+
+# --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/000000/compass--v1.png", width=50)
-    st.title("Configuration")
-    
-    st.info("🔒 Mode Sécurisé (BYOK)")
-    
-    # On ajoute une 'key' pour que Streamlit s'en souvienne
-    api_key = st.text_input(
-        "Votre Clé API OpenAI", 
-        type="password", 
-        key="openai_api_key_input",
-        help="Commence par sk-... Votre clé n'est pas stockée."
-    )
-    
-    model_choice = st.selectbox(
-        "Modèle IA", 
-        ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
-        index=0
-    )
-    
-    st.markdown("---")
-    st.markdown("### 🧭 Étapes")
-    st.progress(0 if st.session_state.step == 'crash_test' else 
-                33 if st.session_state.step == 'generation' else 
-                66 if st.session_state.step == 'priorisation' else 100)
-    
-    # BOUTON RESET SIDEBAR avec CALLBACK
-    st.button("🔄 Nouveau Projet", on_click=reset_app, type="secondary")
+    st.title("⚙️ Configuration")
+    api_key = st.text_input("Clé API OpenAI", type="password", key="openai_api_key_input")
+    model_choice = st.selectbox("Modèle", ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"])
+    st.progress(0 if st.session_state.step == 'crash_test' else 33 if st.session_state.step == 'generation' else 66 if st.session_state.step == 'priorisation' else 100)
+    st.button("🔄 Nouveau Projet", on_click=reset_app)
 
-# --- VÉRIFICATION DE LA CLÉ ---
+# --- VÉRIFICATION CLÉ ---
 if not api_key:
-    st.markdown("<h1 class='main-title'>🧭 IA-BrainStormer GPS</h1>", unsafe_allow_html=True)
-    
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.markdown("### 👋 Bienvenue Architecte")
-        st.write("Ce système transforme vos idées floues en plans d'action concrets.")
-        st.write("Pour commencer, vous devez configurer votre 'Moteur' (Clé API).")
-        
-        st.warning("⬅️ Veuillez entrer votre clé API OpenAI dans la barre latérale.")
-        
-    with col2:
-        with st.expander("🚀 Comment obtenir une clé ?", expanded=True):
-            st.write("""
-            1. Allez sur [platform.openai.com](https://platform.openai.com/api-keys)
-            2. Créez un compte ou connectez-vous.
-            3. Cliquez sur **"Create new secret key"**.
-            4. Copiez la clé (`sk-...`) et collez-la à gauche.
-            """)
-    
+    st.warning("⬅️ Entrez votre clé API OpenAI dans la barre latérale pour commencer.")
     st.stop()
 
-# Initialisation du système
-gps = GPSSystem(api_key=api_key, model=model_choice)
+gps = GPSSystem(api_key, model_choice)
 
-# --- APPLICATION PRINCIPALE ---
-
+# --- CORPS DE L'APP ---
 st.markdown("<h1 class='main-title'>🧭 IA-BrainStormer GPS</h1>", unsafe_allow_html=True)
 
-# 1. PHASE 0 : CRASH TEST D.U.R.
+# PHASE 0
 if st.session_state.step == 'crash_test':
-    st.markdown("<div class='phase-title'>Phase 0 : Le Crash Test D.U.R.</div>", unsafe_allow_html=True)
-    st.info("L'Architecte ne construit pas sur du sable. Vérifions la solidité de votre idée.")
-    
-    idee_initiale = st.text_area(
-        "Quelle est votre idée de projet ?", 
-        height=150,
-        placeholder="Ex: Je veux lancer une formation sur la productivité pour les comptables..."
-    )
-    
+    st.subheader("Phase 0 : Crash Test D.U.R.")
+    idee = st.text_area("Votre idée :", height=150)
     if st.button("🚀 Lancer le Crash Test"):
-        if not idee_initiale:
-            st.error("Veuillez décrire votre idée.")
+        if not idee: st.error("Décrivez votre idée.")
         else:
-            with st.spinner("L'Avocat du Diable analyse votre idée..."):
-                result = gps.crash_test_dur(idee_initiale)
-                st.session_state.crash_test_result = result
-                st.session_state.idee_initiale = idee_initiale
+            with st.spinner("Analyse en cours..."):
+                res = gps.crash_test_dur(idee)
+                st.session_state.crash_test_result = res
+                st.session_state.idee_initiale = idee
                 st.rerun()
 
     if 'crash_test_result' in st.session_state:
         res = st.session_state.crash_test_result
-        
-        # Affichage des jauges
         c1, c2, c3 = st.columns(3)
-        c1.metric("Douleur (Pain)", f"{res.get('score_D', 0)}/10")
-        c2.metric("Urgence", f"{res.get('score_U', 0)}/10")
-        c3.metric("Reconnu", f"{res.get('score_R', 0)}/10")
+        c1.metric("Douleur", f"{res.get('score_D')}/10"); c2.metric("Urgence", f"{res.get('score_U')}/10"); c3.metric("Reconnu", f"{res.get('score_R')}/10")
         
-        if res.get('verdict') == 'VERT':
-            st.markdown(f"<div class='verdict-vert'>✅ <b>FEU VERT</b> : {res.get('analyse_critique')}</div>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div class='verdict-rouge'>🛑 <b>FEU ROUGE</b> : {res.get('analyse_critique')}</div>", unsafe_allow_html=True)
-            st.warning(f"💡 Conseil de l'Architecte : {res.get('conseil_architecte')}")
-
-        st.markdown("### ✍️ Le Veto de l'Architecte")
-        st.write("Avant de passer à la génération, reformulez votre idée en tenant compte du conseil ci-dessus.")
+        if res.get('verdict') == 'VERT': st.markdown(f"<div class='verdict-vert'>✅ {res.get('analyse_critique')}</div>", unsafe_allow_html=True)
+        else: st.markdown(f"<div class='verdict-rouge'>🛑 {res.get('analyse_critique')} <br>💡 {res.get('conseil_architecte')}</div>", unsafe_allow_html=True)
         
-        idee_reformulee = st.text_area(
-            "Idée validée pour la suite :", 
-            value=st.session_state.get('idee_validee', st.session_state.idee_initiale),
-            height=100
-        )
-        
-        if st.button("Valider et Passer à la Phase G (Génération) ➡️"):
-            st.session_state.idee_validee = idee_reformulee
+        validee = st.text_area("Reformulez avant la suite :", value=st.session_state.get('idee_validee', st.session_state.idee_initiale))
+        if st.button("Valider et Passer à la Phase G"):
+            st.session_state.idee_validee = validee
             st.session_state.step = 'generation'
             st.rerun()
 
-# 2. PHASE G : GÉNÉRATION
+# PHASE G
 elif st.session_state.step == 'generation':
-    st.markdown("<div class='phase-title'>Phase G : Générateur d'Angles</div>", unsafe_allow_html=True)
-    st.write(f"Idée de base : **{st.session_state.idee_validee}**")
-    
+    st.subheader("Phase G : Génération")
     if 'phase_g_result' not in st.session_state:
-        with st.spinner("Exploration des multivers stratégiques..."):
-            result = gps.phase_g_generation(st.session_state.idee_validee)
-            st.session_state.phase_g_result = result
+        with st.spinner("Génération..."):
+            st.session_state.phase_g_result = gps.phase_g_generation(st.session_state.idee_validee)
             st.rerun()
-            
     else:
-        angles = st.session_state.phase_g_result.get('angles', [])
         selection = []
+        for a in st.session_state.phase_g_result.get('angles', []):
+            with st.expander(f"📐 {a['titre']}"):
+                st.write(a['opportunite'])
+                if st.checkbox("Sélectionner", key=f"chk_{a['id']}"): selection.append(a)
         
-        st.subheader("Choisissez 3 angles à auditer :")
-        
-        # Gestion de la sélection multiple
-        selected_indices = []
-        for i, angle in enumerate(angles):
-            with st.expander(f"📐 {angle['titre']}"):
-                st.write(f"**Cible :** {angle['cible_precise']}")
-                st.write(f"**Opportunité :** {angle['opportunite']}")
-                if st.checkbox("Sélectionner cet angle", key=f"chk_{angle['id']}"):
-                    selection.append(angle)
-        
-        if len(selection) != 3:
-            st.warning(f"Veuillez sélectionner exactement 3 angles (Actuellement : {len(selection)})")
-        else:
-            if st.button("Passer à la Phase P (Priorisation) ➡️"):
+        if len(selection) == 3:
+            if st.button("Passer à la Phase P"):
                 st.session_state.angles_selectionnes = selection
                 st.session_state.step = 'priorisation'
                 st.rerun()
+        else: st.warning(f"Sélectionnez exactement 3 angles ({len(selection)}/3)")
 
-# 3. PHASE P : PRIORISATION
+# PHASE P
 elif st.session_state.step == 'priorisation':
-    st.markdown("<div class='phase-title'>Phase P : La Matrice de Conviction</div>", unsafe_allow_html=True)
-    
+    st.subheader("Phase P : Priorisation")
     if 'phase_p_result' not in st.session_state:
-        with st.spinner("Calcul des scores (Douleur x4, Unicité x3, Passion x3)..."):
-            result = gps.phase_p_priorisation(st.session_state.angles_selectionnes)
-            st.session_state.phase_p_result = result
+        with st.spinner("Calcul des scores..."):
+            st.session_state.phase_p_result = gps.phase_p_priorisation(st.session_state.angles_selectionnes)
             st.rerun()
-            
     else:
-        evaluations = st.session_state.phase_p_result.get('evaluations', [])
-        reco = st.session_state.phase_p_result.get('recommandation', {})
+        evals = st.session_state.phase_p_result.get('evaluations', [])
+        st.table([{ "Angle": e['titre'], "Score Total": e['score_total_pondere']} for e in evals])
+        st.success(f"Recommandation : Angle #{st.session_state.phase_p_result['recommandation']['id_gagnant']}")
         
-        # Affichage Tableau
-        st.table([{
-            "Angle": e['titre'], 
-            "Douleur (x4)": e['score_douleur'], 
-            "Passion (x3)": e['score_alignement'],
-            "SCORE TOTAL": e['score_total_pondere']
-        } for e in evaluations])
-        
-        st.success(f"🏆 **Recommandation IA :** L'angle #{reco.get('id_gagnant')} est le meilleur compromis.")
-        st.info(f"Pourquoi ? {reco.get('raison')}")
-        
-        # Le Veto final
-        st.markdown("### 👑 Le Choix Final")
-        options = {e['id']: e['titre'] for e in evaluations}
-        
-        # Selectbox simple
-        choix_id = st.selectbox("Quel angle choisissez-vous réellement ?", list(options.keys()), format_func=lambda x: options[x])
-        
-        if st.button("Générer le Plan de Bataille (Phase S) ➡️"):
-            # Retrouver l'objet complet de l'angle choisi
-            angle_final_obj = next((item for item in st.session_state.angles_selectionnes if item["id"] == choix_id), None)
-            st.session_state.angle_choisi = angle_final_obj
+        options = {e['id']: e['titre'] for e in evals}
+        choix = st.selectbox("Votre choix final :", list(options.keys()), format_func=lambda x: options[x])
+        if st.button("Générer le Plan (Phase S)"):
+            st.session_state.angle_choisi = next(a for a in st.session_state.angles_selectionnes if a["id"] == choix)
             st.session_state.step = 'sequencage'
             st.rerun()
 
-# 4. PHASE S : SÉQUENÇAGE
+# PHASE S
 elif st.session_state.step == 'sequencage':
-    st.markdown("<div class='phase-title'>Phase S : Le Plan Backcasting</div>", unsafe_allow_html=True)
-    
+    st.subheader("Phase S : Plan d'Action")
     if 'phase_s_result' not in st.session_state:
-        with st.spinner("Téléchargement du plan depuis le futur (J+7 à J+1)..."):
-            result = gps.phase_s_sequencage(st.session_state.angle_choisi)
-            st.session_state.phase_s_result = result
+        with st.spinner("Backcasting..."):
+            st.session_state.phase_s_result = gps.phase_s_sequencage(st.session_state.angle_choisi)
             st.rerun()
-            
     else:
         plan = st.session_state.phase_s_result
-        st.info(f"🏁 **Objectif J+7 :** {plan.get('resultat_j7')}")
+        st.info(f"Objectif J+7 : {plan.get('resultat_j7')}")
+        for j in plan.get('etapes_journalieres', []):
+            st.write(f"**{j['jour']}** : {j['action_principale']}")
         
-        for jour in plan.get('etapes_journalieres', []):
-            with st.chat_message("assistant"):
-                st.write(f"**{jour['jour']} :** {jour['action_principale']}")
-                st.caption(f"🎯 Détail : {jour['detail_execution']}")
-        
-        st.markdown("---")
-        
-        # Export JSON
-        plan_complet = {
-            'idee': st.session_state.idee_validee,
-            'angle_choisi': st.session_state.angle_choisi,
-            'plan_action': plan
-        }
-        
-        col_dl, col_reset = st.columns(2)
-        
-        with col_dl:
-            st.download_button(
-                "💾 Télécharger mon Plan GPS (.json)",
-                data=json.dumps(plan_complet, indent=4, ensure_ascii=False),
-                file_name="mon_plan_gps.json",
-                mime="application/json",
-                use_container_width=True
-            )
-            
-        with col_reset:
-            # BOUTON RESET FINAL avec CALLBACK
-            st.button("🔄 Lancer un nouveau projet", on_click=reset_app, type="primary", use_container_width=True)
+        st.download_button("💾 Télécharger JSON", data=json.dumps(plan, indent=2), file_name="plan.json")
+        st.button("🔄 Nouveau Projet", on_click=reset_app)
