@@ -1,8 +1,9 @@
 """
 Module de gestion des appels à l'API OpenAI
+Version simplifiée pour compatibilité maximale
 """
 import json
-from openai import OpenAI
+import os
 
 
 class OpenAIHelper:
@@ -16,7 +17,10 @@ class OpenAIHelper:
             api_key: Clé API OpenAI
             default_model: Modèle par défaut à utiliser
         """
-        # Correction : Initialisation simplifiée sans paramètres supplémentaires
+        # Import dynamique pour éviter les conflits
+        from openai import OpenAI
+        
+        # Initialisation ultra-simple sans aucun paramètre supplémentaire
         self.client = OpenAI(api_key=api_key)
         self.default_model = default_model
     
@@ -54,6 +58,7 @@ class OpenAIHelper:
             if response_format:
                 call_params["response_format"] = response_format
             
+            # Appel API
             response = self.client.chat.completions.create(**call_params)
             
             content = response.choices[0].message.content
