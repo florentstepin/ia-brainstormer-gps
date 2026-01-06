@@ -16,6 +16,7 @@ class OpenAIHelper:
             api_key: Clé API OpenAI
             default_model: Modèle par défaut à utiliser
         """
+        # Correction : Initialisation simplifiée sans paramètres supplémentaires
         self.client = OpenAI(api_key=api_key)
         self.default_model = default_model
     
